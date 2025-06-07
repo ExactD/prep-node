@@ -1,11 +1,14 @@
 import express, { Request, Response } from 'express';
 import { Pool } from 'pg';
+import jwt from 'jsonwebtoken';
+import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 
 // Ініціалізація
 dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 5005;
+const PORT = process.env.PORT || 5400;
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 // Підключення до PostgreSQL
 const pool = new Pool({
@@ -18,6 +21,24 @@ const pool = new Pool({
 
 // Middleware
 app.use(express.json());
+app.use(cookieParser());
+
+// Middleware для перевірки JWT
+const authenticateToken = (req: any, res: Response, next: any) => {
+  const token = req.cookies.token;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Токен доступу відсутній' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
+    if (err) {
+      return res.status(403).json({ error: 'Недійсний токен' });
+    }
+    req.user = user;
+    next();
+  });
+};
 
 // Маршрути
 app.get('/', (req: Request, res: Response) => {
@@ -54,9 +75,25 @@ app.post('/register', async (req: Request, res: Response) => {
       [name, email, password]
     );
 
+    const user = result.rows[0];
+
+    // Створення JWT токену
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Встановлення cookie з токеном
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000 // 24 години
+    });
+
     res.status(201).json({
       message: 'Користувач успішно зареєстрований',
-      user: result.rows[0]
+      user: { id: user.id, name: user.name, email: user.email, created_at: user.created_at }
     });
   } catch (err) {
     console.error('Помилка при реєстрації користувача:', err);
@@ -86,9 +123,25 @@ app.post('/login', async (req: Request, res: Response) => {
       });
     }
 
+    const user = result.rows[0];
+
+    // Створення JWT токену
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Встановлення cookie з токеном
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000 // 24 години
+    });
+
     res.json({
       message: 'Успішний вхід',
-      user: result.rows[0]
+      user: user
     });
   } catch (err) {
     console.error('Помилка при логіні:', err);
@@ -96,14 +149,18 @@ app.post('/login', async (req: Request, res: Response) => {
   }
 });
 
-// Отримати профіль користувача за ID
-app.get('/users/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
+// Вихід користувача
+app.post('/logout', (req: Request, res: Response) => {
+  res.clearCookie('token');
+  res.json({ message: 'Успішний вихід' });
+});
 
+// Отримати профіль поточного користувача
+app.get('/profile', authenticateToken, async (req: any, res: Response) => {
   try {
     const result = await pool.query(
       'SELECT id, name, email, created_at FROM users WHERE id = $1',
-      [id]
+      [req.user.id]
     );
 
     if (result.rows.length === 0) {
@@ -112,13 +169,13 @@ app.get('/users/:id', async (req: Request, res: Response) => {
 
     res.json(result.rows[0]);
   } catch (err) {
-    console.error('Помилка при отриманні користувача:', err);
+    console.error('Помилка при отриманні профілю:', err);
     res.status(500).json({ error: 'Внутрішня помилка сервера' });
   }
 });
 
-// Отримати всіх користувачів (без паролів)
-app.get('/users', async (_req: Request, res: Response) => {
+// Отримати всіх користувачів (потребує авторизації)
+app.get('/users', authenticateToken, async (_req: Request, res: Response) => {
   try {
     const result = await pool.query(
       'SELECT id, name, email, created_at FROM users ORDER BY created_at DESC'
@@ -130,15 +187,14 @@ app.get('/users', async (_req: Request, res: Response) => {
   }
 });
 
-// Оновити профіль користувача
-app.put('/users/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
+// Оновити профіль поточного користувача
+app.put('/profile', authenticateToken, async (req: any, res: Response) => {
   const { name } = req.body;
 
   try {
     const result = await pool.query(
       'UPDATE users SET name = COALESCE($1, name) WHERE id = $2 RETURNING id, name, email, created_at',
-      [name, id]
+      [name, req.user.id]
     );
 
     if (result.rows.length === 0) {
