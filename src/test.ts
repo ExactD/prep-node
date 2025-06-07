@@ -3,13 +3,12 @@ import { Pool } from 'pg';
 import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
+import cors from 'cors';
 
 dotenv.config();
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
-const serverless = require('serverless-http');
-module.exports.handler = serverless(app);
 
 // Підключення до PostgreSQL
 const pool = new Pool({
@@ -18,24 +17,49 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: Number(process.env.DB_PORT),
+  ssl: {
+    rejectUnauthorized: false // Увага: це небезпечно для продакшена!
+  }
 });
 
 // Middleware
 app.use(express.json());
 app.use(cookieParser());
 
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', 'http://localhost:3000');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://my-react-project-8o3p.vercel.app'
+];
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Дозволити запити без origin (наприклад, Postman) або з дозволених сайтів
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization'],
+};
+
+app.use(cors(corsOptions));
+
 
 // Middleware для перевірки JWT
 const authenticateToken = (req: any, res: Response, next: any) => {
-  const token = req.cookies.token;
+  // Спочатку перевіряємо токен в cookies
+  let token = req.cookies.token;
+  
+  // Якщо токена немає в cookies, перевіряємо заголовок Authorization
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7); // Видаляємо "Bearer " з початку
+    }
+  }
 
   if (!token) {
     return res.status(401).json({ error: 'Токен доступу відсутній' });

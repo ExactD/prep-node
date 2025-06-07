@@ -7,5 +7,5 @@ dotenv.config();
 const PORT = process.env.PORT || 5414;
 
 app.listen(PORT, () => {
-  console.log(`🚀 Сервер працює на http://localhost:${PORT}`);
+  console.log(`🚀 Сервер працює ${PORT}`);
 });

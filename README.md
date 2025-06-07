@@ -19,7 +19,16 @@ The code provides the user with a JWT token for convenient retrieval of the user
 Saving the JWT in a cookie
 Accessing the PostgreSQL database
 
+The code has been made to issue a JWT token to the user for convenient retrieval of the user profile
+Saving JWT in a cookie
+Accessing the PostgreSQL database
+Also added password hashing
+Email confirmation with sending the user a confirmation code
+Implemented the "Forgot password" function
+
 В коді зроблено видачу користувачу JWT токен для зручного отримання профіля користувача
 Збереження JWT в cooke
 Звертання до бази даних PostgreSQL
 Також додано хешування паролів
+Підтвердження імейлу з надсиланням користувачу код підвердження
+Реалізована функція "Забули пароль"
