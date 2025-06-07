@@ -8,6 +8,8 @@ dotenv.config();
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const serverless = require('serverless-http');
+module.exports.handler = serverless(app);
 
 // Підключення до PostgreSQL
 const pool = new Pool({

@@ -6,13 +6,18 @@ import dotenv from 'dotenv';
 import testRoutes from './test';
 import progressRoutes from './progress';
 import bcrypt from 'bcrypt';
-
+import nodemailer from 'nodemailer';
+import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 const SALT_ROUNDS = 10; // Кількість раундів солювання для bcrypt
+const VERIFICATION_CODE_LENGTH = 6;
+const VERIFICATION_CODE_EXPIRES_MINUTES = 15;
+const serverless = require('serverless-http');
+module.exports.handler = serverless(app);
 
 // Підключення до PostgreSQL
 const pool = new Pool({
@@ -22,6 +27,20 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   port: Number(process.env.DB_PORT),
 });
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER || 'nazarcukmihajlo9@gmail.com', // default для dev mode
+    pass: process.env.EMAIL_PASSWORD || 'ymqf qhtm lzjv pzto',
+  },
+});
+
+interface VerificationData {
+  code: string;
+  expiresAt: number;
+  email: string;
+}
 
 // Middleware
 app.use(express.json());
@@ -37,6 +56,10 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
+
+if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+  console.warn('EMAIL_USER або EMAIL_PASSWORD не встановлені в .env файлі. В режимі розробки коди будуть показуватись у консолі.');
+}
 
 // Middleware для перевірки JWT
 const authenticateToken = (req: any, res: Response, next: any) => {
@@ -55,66 +78,331 @@ const authenticateToken = (req: any, res: Response, next: any) => {
   });
 };
 
-// Реєстрація користувача
-app.post('/register', async (req: Request, res: Response) => {
-  const { name, email, password } = req.body;
+// Тимчасове сховище для кодів підтвердження (в продакшені використовуйте Redis або БД)
+const emailVerificationCodes = new Map<string, VerificationData>();
 
-  // Перевірка обов'язкових полів
-  if (!name || !email || !password) {
+// Генерація та відправка коду підтвердження
+app.post('/send-verification-code', async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email обов\'язковий' });
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Невірний формат email' });
+  }
+
+  try {
+    // Спочатку перевіряємо, чи є вже дійсний код
+    const userResult = await pool.query(
+      'SELECT verification_code, verification_code_expires_at FROM users WHERE email = $1',
+      [email]
+    );
+
+    let verificationCode: string;
+    let expiresAt: Date;
+
+    if (userResult.rows.length > 0 && 
+        userResult.rows[0].verification_code && 
+        new Date(userResult.rows[0].verification_code_expires_at) > new Date()) {
+      // Використовуємо існуючий код
+      verificationCode = userResult.rows[0].verification_code;
+      expiresAt = userResult.rows[0].verification_code_expires_at;
+    } else {
+      // Генеруємо новий код
+      verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+      expiresAt = new Date(Date.now() + VERIFICATION_CODE_EXPIRES_MINUTES * 60 * 1000);
+
+      // Зберігаємо код у базі
+      if (userResult.rows.length > 0) {
+        // Оновлюємо існуючого користувача
+        await pool.query(
+          'UPDATE users SET verification_code = $1, verification_code_expires_at = $2 WHERE email = $3',
+          [verificationCode, expiresAt, email]
+        );
+      } else {
+        // Створюємо новий запис
+        await pool.query(
+          'INSERT INTO users (email, verification_code, verification_code_expires_at) VALUES ($1, $2, $3)',
+          [email, verificationCode, expiresAt]
+        );
+      }
+    }
+
+    // Відправка email
+    if (process.env.NODE_ENV === 'production' && process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
+      try {
+        await transporter.sendMail({
+          from: `"Тестування знань" <${process.env.EMAIL_USER}>`,
+          to: email,
+          subject: 'Код підтвердження email',
+          text: `Ваш код підтвердження: ${verificationCode}`,
+          html: `<p>Ваш код підтвердження: <strong>${verificationCode}</strong></p>
+                 <p>Код дійсний протягом ${VERIFICATION_CODE_EXPIRES_MINUTES} хвилин.</p>`,
+        });
+        console.log(`Код підтвердження відправлено на ${email}`);
+      } catch (mailError) {
+        console.error('Помилка при відправці email:', mailError);
+        return res.status(500).json({ 
+          error: 'Помилка при відправці коду підтвердження'
+        });
+      }
+    } else {
+      console.log(`[DEV] Код підтвердження для ${email}: ${verificationCode}`);
+      console.log(`[DEV] Код дійсний до: ${expiresAt}`);
+    }
+
+    res.json({
+      message: process.env.NODE_ENV === 'production' 
+        ? 'Код підтвердження відправлено на ваш email' 
+        : 'Код підтвердження доступний у консолі (dev mode)',
+      devCode: process.env.NODE_ENV !== 'production' ? verificationCode : undefined,
+    });
+
+  } catch (error) {
+    console.error('Помилка при генерації коду:', error);
+    res.status(500).json({ error: 'Помилка сервера' });
+  }
+});
+
+// Перевірка коду
+app.post('/verify-email-code', async (req: Request, res: Response) => {
+  const { email, code } = req.body;
+
+  if (!email || !code) {
     return res.status(400).json({ 
-      error: 'Імʼя, email та пароль є обовʼязковими полями' 
+      error: 'Необхідні email та код підтвердження' 
     });
   }
 
   try {
-    // Перевірка чи існує користувач з таким email
+    // Отримуємо користувача з бази даних
+    const result = await pool.query(
+      'SELECT id, verification_code, verification_code_expires_at FROM users WHERE email = $1',
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ 
+        error: 'Користувача з таким email не знайдено' 
+      });
+    }
+
+    const user = result.rows[0];
+
+    // Перевіряємо наявність коду
+    if (!user.verification_code || !user.verification_code_expires_at) {
+      return res.status(400).json({ 
+        error: 'Код підтвердження не був відправлений на цей email' 
+      });
+    }
+
+    // Перевіряємо термін дії коду
+    if (new Date() > new Date(user.verification_code_expires_at)) {
+      return res.status(400).json({ 
+        error: 'Код протермінований. Запросіть новий код.' 
+      });
+    }
+
+    // Перевіряємо відповідність коду
+    if (user.verification_code !== code) {
+      return res.status(400).json({ 
+        error: 'Невірний код підтвердження',
+        attemptsLeft: 'X' // Можна додати лічильник спроб
+      });
+    }
+
+    // Позначаємо email як підтверджений
+    await pool.query(
+      'UPDATE users SET email_verified = true, verification_code = NULL, verification_code_expires_at = NULL WHERE email = $1',
+      [email]
+    );
+
+    res.json({ 
+      message: 'Email успішно підтверджено',
+      verifiedEmail: email
+    });
+  } catch (error) {
+    console.error('Помилка при перевірці коду:', error);
+    res.status(500).json({ error: 'Помилка сервера' });
+  }
+});
+
+app.post('/resend-verification-code', async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email обов\'язковий' });
+  }
+
+  try {
+    // Отримуємо поточний код з бази даних
+    const userResult = await pool.query(
+      'SELECT verification_code, verification_code_expires_at FROM users WHERE email = $1',
+      [email]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Користувача з таким email не знайдено' });
+    }
+
+    const user = userResult.rows[0];
+    let verificationCode = user.verification_code;
+    let expiresAt = user.verification_code_expires_at;
+
+    // Якщо код протермінований або відсутній - генеруємо новий
+    if (!verificationCode || !expiresAt || new Date() > new Date(expiresAt)) {
+      verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+      expiresAt = new Date(Date.now() + VERIFICATION_CODE_EXPIRES_MINUTES * 60 * 1000);
+
+      // Оновлюємо код у базі даних
+      await pool.query(
+        'UPDATE users SET verification_code = $1, verification_code_expires_at = $2 WHERE email = $3',
+        [verificationCode, expiresAt, email]
+      );
+    }
+
+    // Відправка email (як у оригінальному методі)
+    if (process.env.NODE_ENV === 'production' && process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
+      await transporter.sendMail({
+        from: `"Тестування знань" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: 'Код підтвердження email',
+        text: `Ваш код підтвердження: ${verificationCode}`,
+        html: `<p>Ваш код підтвердження: <strong>${verificationCode}</strong></p>
+               <p>Код дійсний протягом ${VERIFICATION_CODE_EXPIRES_MINUTES} хвилин.</p>`,
+      });
+    } else {
+      console.log(`[DEV] Код підтвердження для ${email}: ${verificationCode}`);
+      console.log(`[DEV] Код дійсний до: ${expiresAt}`);
+    }
+
+    res.json({
+      message: process.env.NODE_ENV === 'production' 
+        ? 'Код підтвердження відправлено на ваш email' 
+        : 'Код підтвердження доступний у консолі (dev mode)',
+      devCode: process.env.NODE_ENV !== 'production' ? verificationCode : undefined,
+    });
+  } catch (error) {
+    console.error('Помилка при повторному надсиланні коду:', error);
+    res.status(500).json({ error: 'Помилка сервера' });
+  }
+});
+
+// Додати цей ендпоінт перед іншими маршрутами
+app.post('/check-email', async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email обов\'язковий' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT id, email_verified FROM users WHERE email = $1 AND password IS NOT NULL',
+      [email]
+    );
+
+    if (result.rows.length > 0) {
+      return res.json({
+        exists: true,
+        verified: result.rows[0].email_verified
+      });
+    }
+
+    res.json({ exists: false });
+  } catch (error) {
+    console.error('Помилка при перевірці email:', error);
+    res.status(500).json({ error: 'Помилка сервера' });
+  }
+});
+
+// Реєстрація користувача з хешуванням пароля
+app.post('/register', async (req: Request, res: Response) => {
+  const { name, email, password, code } = req.body;
+
+  if (!name || !email || !password || !code) {
+    return res.status(400).json({ error: 'Усі поля обов\'язкові' });
+  }
+
+  try {
     const existingUser = await pool.query(
-      'SELECT id FROM users WHERE email = $1',
+      'SELECT id FROM users WHERE email = $1 AND password IS NOT NULL',
       [email]
     );
 
     if (existingUser.rows.length > 0) {
-      return res.status(409).json({ 
-        error: 'Користувач з таким email вже існує' 
-      });
+      return res.status(400).json({ error: 'Користувач вже зареєстрований' });
     }
 
-    // Хешування паролю
-    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-
-    // Створення нового користувача
-    const result = await pool.query(
-      'INSERT INTO users (name, email, password, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id, name, email, created_at',
-      [name, email, hashedPassword]
+    // Решта логіки реєстрації залишається без змін
+    const userResult = await pool.query(
+      'SELECT id, verification_code, verification_code_expires_at FROM users WHERE email = $1',
+      [email]
     );
 
-    const user = result.rows[0];
+    if (userResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Спочатку отримайте код підтвердження' });
+    }
 
-    // Створення JWT токену
+    const user = userResult.rows[0];
+
+    if (!user.verification_code || !user.verification_code_expires_at) {
+      return res.status(400).json({ error: 'Код підтвердження не був відправлений' });
+    }
+
+    if (new Date() > new Date(user.verification_code_expires_at)) {
+      return res.status(400).json({ error: 'Код протермінований' });
+    }
+
+    if (user.verification_code !== code) {
+      return res.status(400).json({ error: 'Невірний код підтвердження' });
+    }
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ error: 'Користувач вже зареєстрований' });
+    }
+
+    // Хешування пароля
+    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+
+    // Оновлюємо користувача
+    const updatedUser = await pool.query(
+      `UPDATE users 
+       SET name = $1, password = $2, email_verified = true, 
+           verification_code = NULL, verification_code_expires_at = NULL, created_at = NOW()
+       WHERE email = $3 
+       RETURNING id, name, email, created_at`,
+      [name, hashedPassword, email]
+    );
+
+    // Генерація JWT токена
     const token = jwt.sign(
-      { id: user.id, email: user.email },
+      { userId: updatedUser.rows[0].id, email: updatedUser.rows[0].email },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
 
-    // Встановлення cookie з токеном
+    // Встановлення cookie
     res.cookie('token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 24 * 60 * 60 * 1000 // 24 години
+      maxAge: 24 * 60 * 60 * 1000,
+      sameSite: 'strict',
+      secure: process.env.NODE_ENV === 'production'
     });
 
     res.status(201).json({
       message: 'Користувач успішно зареєстрований',
-      user: { id: user.id, name: user.name, email: user.email, created_at: user.created_at }
+      user: updatedUser.rows[0]
     });
-  } catch (err) {
-    console.error('Помилка при реєстрації користувача:', err);
-    res.status(500).json({ error: 'Внутрішня помилка сервера' });
+  } catch (error) {
+    console.error('Помилка при реєстрації:', error);
+    res.status(500).json({ error: 'Помилка сервера при реєстрації' });
   }
 });
 
-// Логін користувача
+// Покращений логін користувача
 app.post('/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
 
@@ -127,7 +415,7 @@ app.post('/login', async (req: Request, res: Response) => {
   try {
     // Отримання користувача з бази даних
     const result = await pool.query(
-      'SELECT id, name, email, password FROM users WHERE email = $1',
+      'SELECT id, name, email, password, email_verified FROM users WHERE email = $1',
       [email]
     );
 
@@ -139,7 +427,14 @@ app.post('/login', async (req: Request, res: Response) => {
 
     const user = result.rows[0];
 
-    // Порівняння хешованого паролю з введеним
+    // Перевірка чи email підтверджений
+    if (!user.email_verified) {
+      return res.status(403).json({
+        error: 'Email не підтверджено. Будь ласка, підтвердіть свій email.'
+      });
+    }
+
+    // Порівняння пароля з хешем
     const isPasswordValid = await bcrypt.compare(password, user.password);
     
     if (!isPasswordValid) {
@@ -148,18 +443,23 @@ app.post('/login', async (req: Request, res: Response) => {
       });
     }
 
-    // Створення JWT токену
+    // Генерація JWT токена
     const token = jwt.sign(
-      { id: user.id, email: user.email },
+      { 
+        id: user.id, 
+        email: user.email,
+        name: user.name
+      },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
 
-    // Встановлення cookie з токеном
+    // Встановлення cookie
     res.cookie('token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      maxAge: 24 * 60 * 60 * 1000 // 24 години
+      maxAge: 24 * 60 * 60 * 1000 * 7,
+      sameSite: 'strict'
     });
 
     // Видаляємо пароль з відповіді
@@ -178,16 +478,12 @@ app.post('/login', async (req: Request, res: Response) => {
 // Вихід користувача
 app.get('/logout', (req: Request, res: Response) => {
   try {
-    // Очищаємо cookie з токеном, встановлюючи ті самі параметри, що і при створенні
     res.clearCookie('token', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict', // Додатковий захист від CSRF
-      path: '/', // Вказуємо той самий шлях, що і для встановлення cookie
+      sameSite: 'strict',
+      path: '/',
     });
-
-    // Додатково можна додати логіку для інвалідації токену, якщо використовується blacklist
-    // Наприклад, якщо ви хочете зробити токен недійсним до закінчення його терміну
     
     res.status(200).json({ 
       success: true,
@@ -221,7 +517,7 @@ app.get('/profile', authenticateToken, async (req: any, res: Response) => {
   }
 });
 
-// Отримати всіх користувачів (потребує авторизації)
+// Отримати всіх користувачів
 app.get('/users', authenticateToken, async (_req: Request, res: Response) => {
   try {
     const result = await pool.query(
