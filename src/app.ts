@@ -3,14 +3,16 @@ import { Pool } from 'pg';
 import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
-import testRoutes from './test'; // <-- ось так
-import progressRoutes from './progress'; // <-- ось так
+import testRoutes from './test';
+import progressRoutes from './progress';
+import bcrypt from 'bcrypt';
 
 
 dotenv.config();
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const SALT_ROUNDS = 10; // Кількість раундів солювання для bcrypt
 
 // Підключення до PostgreSQL
 const pool = new Pool({
@@ -53,11 +55,6 @@ const authenticateToken = (req: any, res: Response, next: any) => {
   });
 };
 
-// Маршрути
-app.get('/', (req: Request, res: Response) => {
-  res.send('Привіт! Сервер працює 🚀');
-});
-
 // Реєстрація користувача
 app.post('/register', async (req: Request, res: Response) => {
   const { name, email, password } = req.body;
@@ -82,10 +79,13 @@ app.post('/register', async (req: Request, res: Response) => {
       });
     }
 
+    // Хешування паролю
+    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+
     // Створення нового користувача
     const result = await pool.query(
       'INSERT INTO users (name, email, password, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id, name, email, created_at',
-      [name, email, password]
+      [name, email, hashedPassword]
     );
 
     const user = result.rows[0];
@@ -125,9 +125,10 @@ app.post('/login', async (req: Request, res: Response) => {
   }
 
   try {
+    // Отримання користувача з бази даних
     const result = await pool.query(
-      'SELECT id, name, email FROM users WHERE email = $1 AND password = $2',
-      [email, password]
+      'SELECT id, name, email, password FROM users WHERE email = $1',
+      [email]
     );
 
     if (result.rows.length === 0) {
@@ -137,6 +138,15 @@ app.post('/login', async (req: Request, res: Response) => {
     }
 
     const user = result.rows[0];
+
+    // Порівняння хешованого паролю з введеним
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    
+    if (!isPasswordValid) {
+      return res.status(401).json({ 
+        error: 'Невірний email або пароль' 
+      });
+    }
 
     // Створення JWT токену
     const token = jwt.sign(
@@ -152,9 +162,12 @@ app.post('/login', async (req: Request, res: Response) => {
       maxAge: 24 * 60 * 60 * 1000 // 24 години
     });
 
+    // Видаляємо пароль з відповіді
+    const { password: _, ...userWithoutPassword } = user;
+
     res.json({
       message: 'Успішний вхід',
-      user: user
+      user: userWithoutPassword
     });
   } catch (err) {
     console.error('Помилка при логіні:', err);
@@ -163,9 +176,30 @@ app.post('/login', async (req: Request, res: Response) => {
 });
 
 // Вихід користувача
-app.post('/logout', (req: Request, res: Response) => {
-  res.clearCookie('token');
-  res.json({ message: 'Успішний вихід' });
+app.get('/logout', (req: Request, res: Response) => {
+  try {
+    // Очищаємо cookie з токеном, встановлюючи ті самі параметри, що і при створенні
+    res.clearCookie('token', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict', // Додатковий захист від CSRF
+      path: '/', // Вказуємо той самий шлях, що і для встановлення cookie
+    });
+
+    // Додатково можна додати логіку для інвалідації токену, якщо використовується blacklist
+    // Наприклад, якщо ви хочете зробити токен недійсним до закінчення його терміну
+    
+    res.status(200).json({ 
+      success: true,
+      message: 'Успішний вихід із системи' 
+    });
+  } catch (err) {
+    console.error('Помилка при виході:', err);
+    res.status(500).json({ 
+      success: false,
+      error: 'Не вдалося виконати вихід' 
+    });
+  }
 });
 
 // Отримати профіль поточного користувача

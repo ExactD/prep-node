@@ -101,7 +101,7 @@ app.put('/update', authenticateToken, async (req: Request, res: Response) => {
   }
 });
 
-app.get('/all', authenticateToken, async (req: Request, res: Response) => {
+app.post('/all', authenticateToken, async (req: Request, res: Response) => {
   const { user_id } = req.body;
 
   try {
@@ -125,7 +125,7 @@ app.post('/get', authenticateToken, async (req: Request, res: Response) => {
 
   try {
     const result = await pool.query(
-      'SELECT test_id FROM user_tests WHERE user_id = $1 AND status = 1 ORDER BY started_at DESC LIMIT 1',
+      'SELECT test_id, started_at FROM user_tests WHERE user_id = $1 AND status = 1 ORDER BY started_at DESC LIMIT 1',
       [user_id]
     );
 
@@ -135,6 +135,7 @@ app.post('/get', authenticateToken, async (req: Request, res: Response) => {
 
     res.json({ 
       test_id: result.rows[0].test_id,
+      started_at: result.rows[0].started_at,
       status: 1 
     });
   } catch (err) {

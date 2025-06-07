@@ -15,4 +15,11 @@ All functions for interacting with the server are separated into separate files 
 
 Всі функції для взаємодії з сервером відокремлено в окремі файли index.ts, test.ts, progress.ts, функціонал і взаємодія з якими зрозуміла по коментарях до цих функці.
 
+The code provides the user with a JWT token for convenient retrieval of the user profile
+Saving the JWT in a cookie
+Accessing the PostgreSQL database
+
 В коді зроблено видачу користувачу JWT токен для зручного отримання профіля користувача
+Збереження JWT в cooke
+Звертання до бази даних PostgreSQL
+Також додано хешування паролів
